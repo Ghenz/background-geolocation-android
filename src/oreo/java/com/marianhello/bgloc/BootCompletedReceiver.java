@@ -42,7 +42,7 @@ public class BootCompletedReceiver extends BroadcastReceiver {
         if (config == null) { return; }
 
         Log.d(TAG, "Boot completed " + config.toString());
-
+        //Adding a comment to test git push
         if (config.getStartOnBoot()) {
             Log.i(TAG, "Starting service after boot");
             Intent locationServiceIntent = new Intent(context, LocationServiceImpl.class);
