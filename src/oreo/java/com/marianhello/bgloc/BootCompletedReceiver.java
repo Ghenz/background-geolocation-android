@@ -18,6 +18,7 @@ import android.util.Log;
 import com.marianhello.bgloc.data.ConfigurationDAO;
 import com.marianhello.bgloc.data.DAOFactory;
 import com.marianhello.bgloc.service.LocationServiceImpl;
+import com.marianhello.bgloc.service.LocationServiceIntentBuilder;
 
 import org.json.JSONException;
 
@@ -26,9 +27,10 @@ import org.json.JSONException;
  */
 public class BootCompletedReceiver extends BroadcastReceiver {
     private static final String TAG = BootCompletedReceiver.class.getName();
+    private LocationServiceIntentBuilder mIntentBuilder;
 
     @Override
-     public void onReceive(Context context, Intent intent) {
+    public void onReceive(Context context, Intent intent) {
         Log.d(TAG, "Received boot completed");
         ConfigurationDAO dao = DAOFactory.createConfigurationDAO(context);
         Config config = null;
@@ -36,16 +38,19 @@ public class BootCompletedReceiver extends BroadcastReceiver {
         try {
             config = dao.retrieveConfiguration();
         } catch (JSONException e) {
-            //noop
+            // noop
         }
 
-        if (config == null) { return; }
+        if (config == null) {
+            return;
+        }
 
         Log.d(TAG, "Boot completed " + config.toString());
-        //Changing again but in a code editor
+
         if (config.getStartOnBoot()) {
             Log.i(TAG, "Starting service after boot");
-            Intent locationServiceIntent = new Intent(context, LocationServiceImpl.class);
+            mIntentBuilder = new LocationServiceIntentBuilder(context);
+            Intent locationServiceIntent = mIntentBuilder.setCommand(0).build();
             locationServiceIntent.addFlags(Intent.FLAG_FROM_BACKGROUND);
             locationServiceIntent.putExtra("config", config);
 
@@ -55,5 +60,5 @@ public class BootCompletedReceiver extends BroadcastReceiver {
                 context.startService(locationServiceIntent);
             }
         }
-     }
+    }
 }
