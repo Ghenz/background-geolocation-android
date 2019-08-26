@@ -18,9 +18,9 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.location.GnssStatus.Callback;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
+import android.os.BatteryManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
@@ -32,9 +32,15 @@ import android.os.Message;
 import android.os.Process;
 import android.support.annotation.Nullable;
 import android.support.v4.content.LocalBroadcastManager;
+import android.telephony.TelephonyManager;
+import android.telephony.PhoneStateListener;
+import android.telephony.SignalStrength;
+import android.telephony.CellInfoGsm;
+import android.telephony.CellSignalStrengthGsm;
 
 import com.marianhello.bgloc.Config;
 import com.marianhello.bgloc.ConnectivityListener;
+import com.marianhello.bgloc.HttpPostService;
 import com.marianhello.bgloc.NotificationHelper;
 import com.marianhello.bgloc.PluginException;
 import com.marianhello.bgloc.PostLocationTask;
@@ -59,14 +65,15 @@ import com.marianhello.logging.UncaughtExceptionLogger;
 
 import org.chromium.content.browser.ThreadUtils;
 import org.json.JSONException;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.containsCommand;
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.containsMessage;
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.getCommand;
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.getMessage;
-
-import android.util.Log;
-import java.util.Set;
 
 public class LocationServiceImpl extends Service implements ProviderDelegate, LocationService {
 
@@ -104,7 +111,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     public static final int MSG_ON_HTTP_AUTHORIZATION = 107;
 
     /** notification id */
-    private static int NOTIFICATION_ID = 1;
+    private static int NOTIFICATION_ID = 0;
 
     private ResourceResolver mResolver;
     private Config mConfig;
@@ -127,6 +134,10 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
     private static LocationTransform sLocationTransform;
     private static LocationProviderFactory sLocationProviderFactory;
+
+    private int lastSignalLevel;
+    private int lastBatteryLevel;
+    private String imei;
 
     private class ServiceHandler extends Handler {
         public ServiceHandler(Looper looper) {
@@ -194,7 +205,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         String authority = mResolver.getAuthority();
         ContentResolver.setIsSyncable(mSyncAccount, authority, 1);
-        ContentResolver.setSyncAutomatically(mSyncAccount, authority, false);
+        ContentResolver.setSyncAutomatically(mSyncAccount, authority, true);
 
         mLocationDAO = DAOFactory.createLocationDAO(this);
 
@@ -211,7 +222,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
             @Override
             public void onSyncRequested() {
-                // SyncService.sync(mSyncAccount, mResolver.getAuthority(), true);
+                // SyncService.sync(mSyncAccount, mResolver.getAuthority(), false);
             }
         }, new ConnectivityListener() {
             @Override
@@ -219,10 +230,13 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                 return isNetworkAvailable();
             }
         });
+        TelephonyManager tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
+        imei = tm.getDeviceId();
 
+        tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
         registerReceiver(connectivityChangeReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
+        registerReceiver(batteryChangeReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         NotificationHelper.registerServiceChannel(this);
-
     }
 
     @Override
@@ -275,7 +289,6 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
 
         boolean containsCommand = containsCommand(intent);
-
         logger.debug(String.format("Service in [%s] state. cmdId: [%s]. startId: [%d]",
                 sIsRunning ? "STARTED" : "NOT STARTED", containsCommand ? getCommand(intent).getId() : "N/A", startId));
 
@@ -394,21 +407,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             if (mProvider != null) {
                 mProvider.onCommand(LocationProvider.CMD_SWITCH_MODE, LocationProvider.FOREGROUND_MODE);
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                super.startForeground(NOTIFICATION_ID, notification);
-            } else {
-                super.startForeground(0, notification);
-            }
-
-            // Handler h = new Handler(Looper.getMainLooper());
-            // long delayInMilliseconds = 5000;
-            // h.postDelayed(new Runnable() {
-            // public void run() {
-            // logger.info("Notification cancelledAt: {}", System.currentTimeMillis());
-            // notificationManager.cancel(NOTIFICATION_ID);
-            // }
-            // }, delayInMilliseconds);
-
+            super.startForeground(NOTIFICATION_ID, notification);
             mIsInForeground = true;
         }
     }
@@ -457,11 +456,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
                             NotificationManager notificationManager = (NotificationManager) getSystemService(
                                     Context.NOTIFICATION_SERVICE);
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                notificationManager.notify(NOTIFICATION_ID, notification);
-                            } else {
-                                notificationManager.notify(0, notification);
-                            }
+                            notificationManager.notify(NOTIFICATION_ID, notification);
                         }
                     }
                 }
@@ -699,11 +694,69 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             boolean hasConnectivity = isNetworkAvailable();
             mPostLocationTask.setHasConnectivity(hasConnectivity);
             logger.info("Network condition changed has connectivity: {}", hasConnectivity);
-
             if (hasConnectivity) {
-                logger.debug("Uploading offline locations");
+                logger.info("Uploading offline locations");
                 SyncService.sync(mSyncAccount, mResolver.getAuthority(), true);
             }
+        }
+    };
+
+    private BroadcastReceiver batteryChangeReceiver = new BroadcastReceiver() {
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            int status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+            boolean isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING
+                    || status == BatteryManager.BATTERY_STATUS_FULL;
+            int level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+            int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+            String technology = intent.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY);
+            int chargePlug = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1);
+
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            String currentDateandTime = sdf.format(new Date());
+
+            if (lastBatteryLevel != level) {
+                lastBatteryLevel = level;
+                JSONObject batteryJson = new JSONObject();
+                int responseCode;
+
+                try {
+                    batteryJson.put("chargePlug", chargePlug);
+                    batteryJson.put("scale", scale);
+                    batteryJson.put("level", level);
+                    batteryJson.put("isCharging", isCharging);
+                    batteryJson.put("tec", technology);
+                    batteryJson.put("imei", imei);
+                    batteryJson.put("date", currentDateandTime);
+                } catch (Exception e) {
+                    // TODO: handle exception
+                }
+
+                logger.debug("Battery level: {} , battery charging: {}, technology: {}", lastBatteryLevel, isCharging,
+                        technology);
+
+                try {
+                    HttpPostService.postJSON("http://node.phoneup.com.br:3333/battery", batteryJson,
+                            mConfig.getHttpHeaders());
+                } catch (Exception e) {
+                    logger.warn("Error while posting locations: {}", e.getMessage());
+                }
+
+            }
+
+        }
+    };
+
+    private PhoneStateListener signalStrengthListener = new PhoneStateListener() {
+        @Override
+        public void onSignalStrengthsChanged(SignalStrength signalStrength) {
+            int currentLevel = signalStrength.getLevel();
+            if (currentLevel != lastSignalLevel) {
+                lastSignalLevel = currentLevel;
+                logger.debug("Signal Level: {}", lastSignalLevel);
+            }
+
         }
     };
 
