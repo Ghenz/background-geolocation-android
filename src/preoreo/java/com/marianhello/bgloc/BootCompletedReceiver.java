@@ -54,11 +54,7 @@ public class BootCompletedReceiver extends BroadcastReceiver {
             locationServiceIntent.addFlags(Intent.FLAG_FROM_BACKGROUND);
             locationServiceIntent.putExtra("config", config);
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(locationServiceIntent);
-            } else {
-                context.startService(locationServiceIntent);
-            }
+            context.startService(locationServiceIntent);
         }
     }
 }
