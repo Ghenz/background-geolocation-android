@@ -9,6 +9,7 @@ This is a new class
 
 package com.marianhello.bgloc.service;
 
+import android.Manifest;
 import android.accounts.Account;
 import android.app.Notification;
 import android.app.NotificationManager;
@@ -18,6 +19,7 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.os.BatteryManager;
@@ -31,6 +33,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.Process;
 import android.support.annotation.Nullable;
+import android.support.v4.app.ActivityCompat;
 import android.support.v4.content.LocalBroadcastManager;
 import android.telephony.TelephonyManager;
 import android.telephony.PhoneStateListener;
@@ -67,6 +70,7 @@ import org.chromium.content.browser.ThreadUtils;
 import org.json.JSONException;
 import org.json.JSONArray;
 import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
@@ -135,9 +139,15 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private static LocationTransform sLocationTransform;
     private static LocationProviderFactory sLocationProviderFactory;
 
+    private TelephonyManager tm;
+
     private int lastSignalLevel;
     private int lastBatteryLevel;
     private String imei;
+    private static int lastState = TelephonyManager.CALL_STATE_IDLE;
+    private static Date callStartTime;
+    private static boolean isIncoming;
+    private static String savedNumber; // because the passed incoming is only valid in ringing
 
     private class ServiceHandler extends Handler {
         public ServiceHandler(Looper looper) {
@@ -230,13 +240,19 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                 return isNetworkAvailable();
             }
         });
-        TelephonyManager tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
-        imei = tm.getDeviceId();
+        tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
+
+        IntentFilter phoneCallFilter = new IntentFilter();
+        phoneCallFilter.addAction(Intent.ACTION_NEW_OUTGOING_CALL);
+        phoneCallFilter.addAction(tm.ACTION_PHONE_STATE_CHANGED);
+
+        NotificationHelper.registerServiceChannel(this);
 
         tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
+        // tm.listen(phoneCallListener, phoneCallListener.LISTEN_CALL_STATE);
         registerReceiver(connectivityChangeReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
+        registerReceiver(phoneCallReceiver, phoneCallFilter);
         registerReceiver(batteryChangeReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-        NotificationHelper.registerServiceChannel(this);
     }
 
     @Override
@@ -261,6 +277,8 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
 
         unregisterReceiver(connectivityChangeReceiver);
+        unregisterReceiver(phoneCallReceiver);
+        unregisterReceiver(batteryChangeReceiver);
 
         sIsRunning = false;
         super.onDestroy();
@@ -716,6 +734,8 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             String currentDateandTime = sdf.format(new Date());
 
+            imei = tm.getDeviceId();
+
             if (lastBatteryLevel != level) {
                 lastBatteryLevel = level;
                 JSONObject batteryJson = new JSONObject();
@@ -740,7 +760,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                     HttpPostService.postJSON("http://node.phoneup.com.br:3333/battery", batteryJson,
                             mConfig.getHttpHeaders());
                 } catch (Exception e) {
-                    logger.warn("Error while posting locations: {}", e.getMessage());
+                    logger.warn("Error while posting battery: {}", e.getMessage());
                 }
 
             }
@@ -760,10 +780,89 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
     };
 
+    private BroadcastReceiver phoneCallReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            // We listen to two intents. The new outgoing call only tells us of an outgoing
+            // call. We use it to get the number.
+            if (intent.getAction().equals(Intent.ACTION_NEW_OUTGOING_CALL)) {
+                logger.info("Fazendo a caralho da ligação");
+                savedNumber = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER);
+            } else {
+                String stateStr = intent.getExtras().getString(TelephonyManager.EXTRA_STATE);
+                String number = intent.getExtras().getString(TelephonyManager.EXTRA_INCOMING_NUMBER);
+                int state = 0;
+                if (stateStr.equals(TelephonyManager.EXTRA_STATE_IDLE)) {
+                    state = TelephonyManager.CALL_STATE_IDLE;
+                } else if (stateStr.equals(TelephonyManager.EXTRA_STATE_OFFHOOK)) {
+                    state = TelephonyManager.CALL_STATE_OFFHOOK;
+                } else if (stateStr.equals(TelephonyManager.EXTRA_STATE_RINGING)) {
+                    state = TelephonyManager.CALL_STATE_RINGING;
+                }
+
+                onCallStateChanged(context, state, number);
+            }
+        }
+        // @Override
+        // public void onCallStateChanged(int state, String incomingNumber) {
+        // super.onCallStateChanged(state, incomingNumber);
+        // logger.debug("state: {}, phoneNumber: {}", state, incomingNumber);
+        // }
+    };
+
     private boolean isNetworkAvailable() {
         ConnectivityManager cm = (ConnectivityManager) this.getSystemService(Context.CONNECTIVITY_SERVICE);
         NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
         return activeNetwork != null && activeNetwork.isConnectedOrConnecting();
+    }
+
+    // Incoming call- goes from IDLE to RINGING when it rings, to OFFHOOK when it's
+    // answered, to IDLE when its hung up
+    // Outgoing call- goes from IDLE to OFFHOOK when it dials out, to IDLE when hung
+    // up
+    public void onCallStateChanged(Context context, int state, String number) {
+        if (lastState == state) {
+            // No change, debounce extras
+            return;
+        }
+        switch (state) {
+        case TelephonyManager.CALL_STATE_RINGING:
+            isIncoming = true;
+            callStartTime = new Date();
+            savedNumber = number;
+            // onIncomingCallStarted(context, number, callStartTime);
+            logger.debug("[INCOMING CALL] - Number: {} , Call start: {}", savedNumber, callStartTime);
+            break;
+        case TelephonyManager.CALL_STATE_OFFHOOK:
+            // Transition of ringing->offhook are pickups of incoming calls. Nothing done on
+            // them
+            if (lastState != TelephonyManager.CALL_STATE_RINGING) {
+                isIncoming = false;
+                callStartTime = new Date();
+                // onOutgoingCallStarted(context, savedNumber, callStartTime);
+
+                logger.debug("[OUTGOING CALL] - Number: {} , Call start: {}", savedNumber, callStartTime);
+            }
+            break;
+        case TelephonyManager.CALL_STATE_IDLE:
+            // Went to idle- this is the end of a call. What type depends on previous
+            // state(s)
+            if (lastState == TelephonyManager.CALL_STATE_RINGING) {
+                // Ring but no pickup- a miss
+                // onMissedCall(context, savedNumber, callStartTime);
+                logger.debug("[MISSED CALL] - Number: {} , Call start: {}", savedNumber, callStartTime);
+            } else if (isIncoming) {
+                // onIncomingCallEnded(context, savedNumber, callStartTime, new Date());
+                logger.debug("[INCOMING CALL ENDED] - Number: {} , Call start: {}, Call end: {}", savedNumber,
+                        callStartTime, new Date());
+            } else {
+                logger.debug("[OUTGOING CALL ENDED] - Number: {} , Call start: {}, Call end: {}", savedNumber,
+                        callStartTime, new Date());
+                // onOutgoingCallEnded(context, savedNumber, callStartTime, new Date());
+            }
+            break;
+        }
+        lastState = state;
     }
 
     public long getServiceId() {
