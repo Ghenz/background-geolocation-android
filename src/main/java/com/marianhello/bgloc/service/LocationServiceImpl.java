@@ -40,8 +40,12 @@ import android.telephony.CellSignalStrengthGsm;
 
 import com.marianhello.bgloc.Config;
 import com.marianhello.bgloc.ConnectivityListener;
+<<<<<<< HEAD
 import com.marianhello.bgloc.HttpPostService;
 import com.marianhello.bgloc.NotificationHelper;
+=======
+import com.marianhello.bgloc.sync.NotificationHelper;
+>>>>>>> upstream/master
 import com.marianhello.bgloc.PluginException;
 import com.marianhello.bgloc.PostLocationTask;
 import com.marianhello.bgloc.ResourceResolver;
@@ -50,11 +54,14 @@ import com.marianhello.bgloc.data.BackgroundLocation;
 import com.marianhello.bgloc.data.ConfigurationDAO;
 import com.marianhello.bgloc.data.DAOFactory;
 import com.marianhello.bgloc.data.LocationDAO;
+import com.marianhello.bgloc.data.LocationTransform;
+import com.marianhello.bgloc.headless.AbstractTaskRunner;
 import com.marianhello.bgloc.headless.ActivityTask;
-import com.marianhello.bgloc.headless.HeadlessTaskRunner;
 import com.marianhello.bgloc.headless.LocationTask;
 import com.marianhello.bgloc.headless.StationaryTask;
 import com.marianhello.bgloc.headless.Task;
+import com.marianhello.bgloc.headless.TaskRunner;
+import com.marianhello.bgloc.headless.TaskRunnerFactory;
 import com.marianhello.bgloc.provider.LocationProvider;
 import com.marianhello.bgloc.provider.LocationProviderFactory;
 import com.marianhello.bgloc.provider.ProviderDelegate;
@@ -125,8 +132,8 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private ServiceHandler mServiceHandler;
     private LocationDAO mLocationDAO;
     private PostLocationTask mPostLocationTask;
-    private String mHeadlessFunction;
-    private HeadlessTaskRunner mHeadlessTaskRunner;
+    private String mHeadlessTaskRunnerClass;
+    private TaskRunner mHeadlessTaskRunner;
 
     private long mServiceId = -1;
     private static boolean sIsRunning = false;
@@ -209,22 +216,39 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         mLocationDAO = DAOFactory.createLocationDAO(this);
 
+<<<<<<< HEAD
         mPostLocationTask = new PostLocationTask(mLocationDAO, new PostLocationTask.PostLocationTaskListener() {
             @Override
             public void onRequestedAbortUpdates() {
                 handleRequestedAbortUpdates();
             }
+=======
+        mPostLocationTask = new PostLocationTask(mLocationDAO,
+                new PostLocationTask.PostLocationTaskListener() {
+                    @Override
+                    public void onRequestedAbortUpdates() {
+                        handleRequestedAbortUpdates();
+                    }
+>>>>>>> upstream/master
 
-            @Override
-            public void onHttpAuthorizationUpdates() {
-                handleHttpAuthorizationUpdates();
-            }
+                    @Override
+                    public void onHttpAuthorizationUpdates() {
+                        handleHttpAuthorizationUpdates();
+                    }
 
+<<<<<<< HEAD
             @Override
             public void onSyncRequested() {
                 // SyncService.sync(mSyncAccount, mResolver.getAuthority(), false);
             }
         }, new ConnectivityListener() {
+=======
+                    @Override
+                    public void onSyncRequested() {
+                        SyncService.sync(mSyncAccount, mResolver.getAuthority(), false);
+                    }
+                }, new ConnectivityListener() {
+>>>>>>> upstream/master
             @Override
             public boolean hasConnectivity() {
                 return isNetworkAvailable();
@@ -311,6 +335,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private void processCommand(int command, Object arg) {
         try {
             switch (command) {
+<<<<<<< HEAD
             case CommandId.START:
                 start();
                 break;
@@ -332,6 +357,35 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             case CommandId.START_HEADLESS_TASK:
                 startHeadlessTask();
                 break;
+=======
+                case CommandId.START:
+                    start();
+                    break;
+                case CommandId.START_FOREGROUND_SERVICE:
+                    startForegroundService();
+                    break;
+                case CommandId.STOP:
+                    stop();
+                    break;
+                case CommandId.CONFIGURE:
+                    configure((Config) arg);
+                    break;
+                case CommandId.STOP_FOREGROUND:
+                    stopForeground();
+                    break;
+                case CommandId.START_FOREGROUND:
+                    startForeground();
+                    break;
+                case CommandId.REGISTER_HEADLESS_TASK:
+                    registerHeadlessTask((String) arg);
+                    break;
+                case CommandId.START_HEADLESS_TASK:
+                    startHeadlessTask();
+                    break;
+                case CommandId.STOP_HEADLESS_TASK:
+                    stopHeadlessTask();
+                    break;
+>>>>>>> upstream/master
             }
         } catch (Exception e) {
             logger.error("processCommand: exception", e);
@@ -377,6 +431,12 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         bundle.putInt("action", MSG_ON_SERVICE_STARTED);
         bundle.putLong("serviceId", mServiceId);
         broadcastMessage(bundle);
+    }
+
+    @Override
+    public synchronized void startForegroundService() {
+        start();
+        startForeground();
     }
 
     @Override
@@ -480,17 +540,33 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     }
 
     @Override
-    public synchronized void registerHeadlessTask(String jsFunction) {
+    public synchronized void registerHeadlessTask(String taskRunnerClass) {
         logger.debug("Registering headless task");
-        mHeadlessFunction = jsFunction;
+        mHeadlessTaskRunnerClass = taskRunnerClass;
     }
 
     @Override
     public synchronized void startHeadlessTask() {
+<<<<<<< HEAD
         if (mHeadlessFunction != null) {
             mHeadlessTaskRunner = new HeadlessTaskRunner(this);
             mHeadlessTaskRunner.setFunction(mHeadlessFunction);
+=======
+        if (mHeadlessTaskRunnerClass != null) {
+            TaskRunnerFactory trf = new TaskRunnerFactory();
+            try {
+                mHeadlessTaskRunner = trf.getTaskRunner(mHeadlessTaskRunnerClass);
+                ((AbstractTaskRunner) mHeadlessTaskRunner).setContext(this);
+            } catch (Exception e) {
+                logger.error("Headless task start failed: {}", e.getMessage());
+            }
+>>>>>>> upstream/master
         }
+    }
+
+    @Override
+    public synchronized void stopHeadlessTask() {
+        mHeadlessTaskRunner = null;
     }
 
     @Override
