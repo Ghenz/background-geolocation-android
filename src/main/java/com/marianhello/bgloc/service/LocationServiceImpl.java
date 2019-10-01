@@ -40,12 +40,7 @@ import android.telephony.CellSignalStrengthGsm;
 
 import com.marianhello.bgloc.Config;
 import com.marianhello.bgloc.ConnectivityListener;
-<<<<<<< HEAD
-import com.marianhello.bgloc.HttpPostService;
-import com.marianhello.bgloc.NotificationHelper;
-=======
 import com.marianhello.bgloc.sync.NotificationHelper;
->>>>>>> upstream/master
 import com.marianhello.bgloc.PluginException;
 import com.marianhello.bgloc.PostLocationTask;
 import com.marianhello.bgloc.ResourceResolver;
@@ -216,50 +211,35 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         mLocationDAO = DAOFactory.createLocationDAO(this);
 
-<<<<<<< HEAD
         mPostLocationTask = new PostLocationTask(mLocationDAO, new PostLocationTask.PostLocationTaskListener() {
             @Override
             public void onRequestedAbortUpdates() {
                 handleRequestedAbortUpdates();
             }
-=======
-        mPostLocationTask = new PostLocationTask(mLocationDAO,
-                new PostLocationTask.PostLocationTaskListener() {
-                    @Override
-                    public void onRequestedAbortUpdates() {
-                        handleRequestedAbortUpdates();
-                    }
->>>>>>> upstream/master
 
-                    @Override
-                    public void onHttpAuthorizationUpdates() {
-                        handleHttpAuthorizationUpdates();
-                    }
+            @Override
+            public void onHttpAuthorizationUpdates() {
+                handleHttpAuthorizationUpdates();
+            }
 
-<<<<<<< HEAD
             @Override
             public void onSyncRequested() {
                 // SyncService.sync(mSyncAccount, mResolver.getAuthority(), false);
             }
         }, new ConnectivityListener() {
-=======
-                    @Override
-                    public void onSyncRequested() {
-                        SyncService.sync(mSyncAccount, mResolver.getAuthority(), false);
-                    }
-                }, new ConnectivityListener() {
->>>>>>> upstream/master
             @Override
             public boolean hasConnectivity() {
                 return isNetworkAvailable();
             }
         });
+
         TelephonyManager tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
         imei = tm.getDeviceId();
 
         tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
         registerReceiver(connectivityChangeReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
         registerReceiver(batteryChangeReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+
         NotificationHelper.registerServiceChannel(this);
     }
 
@@ -335,9 +315,11 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private void processCommand(int command, Object arg) {
         try {
             switch (command) {
-<<<<<<< HEAD
             case CommandId.START:
                 start();
+                break;
+            case CommandId.START_FOREGROUND_SERVICE:
+                startForegroundService();
                 break;
             case CommandId.STOP:
                 stop();
@@ -357,35 +339,9 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             case CommandId.START_HEADLESS_TASK:
                 startHeadlessTask();
                 break;
-=======
-                case CommandId.START:
-                    start();
-                    break;
-                case CommandId.START_FOREGROUND_SERVICE:
-                    startForegroundService();
-                    break;
-                case CommandId.STOP:
-                    stop();
-                    break;
-                case CommandId.CONFIGURE:
-                    configure((Config) arg);
-                    break;
-                case CommandId.STOP_FOREGROUND:
-                    stopForeground();
-                    break;
-                case CommandId.START_FOREGROUND:
-                    startForeground();
-                    break;
-                case CommandId.REGISTER_HEADLESS_TASK:
-                    registerHeadlessTask((String) arg);
-                    break;
-                case CommandId.START_HEADLESS_TASK:
-                    startHeadlessTask();
-                    break;
-                case CommandId.STOP_HEADLESS_TASK:
-                    stopHeadlessTask();
-                    break;
->>>>>>> upstream/master
+            case CommandId.STOP_HEADLESS_TASK:
+                stopHeadlessTask();
+                break;
             }
         } catch (Exception e) {
             logger.error("processCommand: exception", e);
@@ -547,11 +503,6 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
     @Override
     public synchronized void startHeadlessTask() {
-<<<<<<< HEAD
-        if (mHeadlessFunction != null) {
-            mHeadlessTaskRunner = new HeadlessTaskRunner(this);
-            mHeadlessTaskRunner.setFunction(mHeadlessFunction);
-=======
         if (mHeadlessTaskRunnerClass != null) {
             TaskRunnerFactory trf = new TaskRunnerFactory();
             try {
@@ -560,7 +511,6 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             } catch (Exception e) {
                 logger.error("Headless task start failed: {}", e.getMessage());
             }
->>>>>>> upstream/master
         }
     }
 
