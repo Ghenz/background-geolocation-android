@@ -28,10 +28,10 @@ import com.marianhello.bgloc.data.LocationDAO;
 import com.marianhello.bgloc.provider.LocationProvider;
 import com.marianhello.bgloc.service.LocationService;
 import com.marianhello.bgloc.service.LocationServiceImpl;
-import com.marianhello.bgloc.service.LocationServiceInfo;
 import com.marianhello.bgloc.service.LocationServiceProxy;
-import com.marianhello.bgloc.service.LocationTransform;
+import com.marianhello.bgloc.data.LocationTransform;
 import com.marianhello.bgloc.sync.AccountHelper;
+import com.marianhello.bgloc.sync.NotificationHelper;
 import com.marianhello.bgloc.sync.SyncService;
 import com.marianhello.logging.DBLogReader;
 import com.marianhello.logging.LogEntry;
@@ -59,6 +59,7 @@ public class BackgroundGeolocationFacade {
 
     private boolean mServiceBroadcastReceiverRegistered = false;
     private boolean mLocationModeChangeReceiverRegistered = false;
+    private boolean mIsPaused = false;
 
     private Config mConfig;
     private final Context mContext;
@@ -166,7 +167,7 @@ public class BackgroundGeolocationFacade {
 
                     if (mDelegate != null) {
                         mDelegate.onHttpAuthorization();
-                    } 
+                    }
 
                     return;
                 }
@@ -245,10 +246,13 @@ public class BackgroundGeolocationFacade {
     }
 
     public void pause() {
+        mIsPaused = true;
         mService.startForeground();
     }
 
     public void resume() {
+        mIsPaused = false;
+        mService.stopHeadlessTask();
         if (!getConfig().getStartForeground()) {
             mService.stopForeground();
         }
@@ -425,14 +429,18 @@ public class BackgroundGeolocationFacade {
         }
     }
 
-    public void registerHeadlessTask(final String jsFunction) {
-        logger.info("Registering headless task");
-        mService.registerHeadlessTask(jsFunction);
+    public void registerHeadlessTask(final String taskRunnerClass) {
+        logger.info("Registering headless task: {}", taskRunnerClass);
+        mService.registerHeadlessTask(taskRunnerClass);
     }
 
     private void startBackgroundService() {
         logger.info("Attempt to start bg service");
-        mService.start();
+        if (mIsPaused) {
+            mService.startForegroundService();
+        } else {
+            mService.start();
+        }
     }
 
     private void stopBackgroundService() {
