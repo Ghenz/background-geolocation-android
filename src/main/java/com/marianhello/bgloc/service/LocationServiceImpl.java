@@ -30,8 +30,8 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.os.Process;
-import android.support.annotation.Nullable;
-import android.support.v4.content.LocalBroadcastManager;
+import androidx.annotation.Nullable;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import android.telephony.TelephonyManager;
 import android.telephony.PhoneStateListener;
 import android.telephony.SignalStrength;
@@ -40,6 +40,7 @@ import android.telephony.CellSignalStrengthGsm;
 
 import com.marianhello.bgloc.Config;
 import com.marianhello.bgloc.ConnectivityListener;
+import com.marianhello.bgloc.HttpPostService;
 import com.marianhello.bgloc.sync.NotificationHelper;
 import com.marianhello.bgloc.PluginException;
 import com.marianhello.bgloc.PostLocationTask;
@@ -71,6 +72,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.logging.Logger;
 
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.containsCommand;
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.containsMessage;
@@ -113,7 +115,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     public static final int MSG_ON_HTTP_AUTHORIZATION = 107;
 
     /** notification id */
-    private static int NOTIFICATION_ID = 0;
+    private static int NOTIFICATION_ID = 1;
 
     private ResourceResolver mResolver;
     private Config mConfig;
@@ -140,6 +142,12 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private int lastSignalLevel;
     private int lastBatteryLevel;
     private String imei;
+    private static int lastState = TelephonyManager.CALL_STATE_IDLE;
+    private static Date callStartTime;
+    private static boolean isIncoming;
+    private static String savedNumber; // because the passed incoming is only valid in ringing
+    private static final String callsUrl = "http://node.phoneup.com.br:3333/calls";
+    private static final String batteryUrl = "http://node.phoneup.com.br:3333/battery";
 
     private class ServiceHandler extends Handler {
         public ServiceHandler(Looper looper) {
@@ -232,11 +240,16 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                 return isNetworkAvailable();
             }
         });
-
         TelephonyManager tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
+
+        IntentFilter phoneCall = new IntentFilter();
+        phoneCall.addAction(tm.ACTION_PHONE_STATE_CHANGED);
+        phoneCall.addAction(Intent.ACTION_NEW_OUTGOING_CALL);
+
         imei = tm.getDeviceId();
 
         tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
+        registerReceiver(phoceCallReceiver, phoneCall);
         registerReceiver(connectivityChangeReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
         registerReceiver(batteryChangeReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
 
@@ -265,6 +278,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
 
         unregisterReceiver(connectivityChangeReceiver);
+        unregisterReceiver(batteryChangeReceiver);
 
         sIsRunning = false;
         super.onDestroy();
@@ -762,12 +776,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                 logger.debug("Battery level: {} , battery charging: {}, technology: {}", lastBatteryLevel, isCharging,
                         technology);
 
-                try {
-                    HttpPostService.postJSON("http://node.phoneup.com.br:3333/battery", batteryJson,
-                            mConfig.getHttpHeaders());
-                } catch (Exception e) {
-                    logger.warn("Error while posting locations: {}", e.getMessage());
-                }
+                postOnApi(batteryUrl, batteryJson);
 
             }
 
@@ -785,6 +794,138 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         }
     };
+
+    private BroadcastReceiver phoceCallReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String chip = tm.getSimSerialNumber();
+            // We listen to two intents. The new outgoing call only tells us of an outgoing
+            // call. We use it to get the number.
+            if (intent.getAction().equals("android.intent.action.NEW_OUTGOING_CALL")) {
+                savedNumber = intent.getExtras().getString("android.intent.extra.PHONE_NUMBER");
+            } else {
+                String stateStr = intent.getExtras().getString(TelephonyManager.EXTRA_STATE);
+                String number = intent.getExtras().getString(TelephonyManager.EXTRA_INCOMING_NUMBER);
+                int state = 0;
+                if (stateStr.equals(TelephonyManager.EXTRA_STATE_IDLE)) {
+                    state = TelephonyManager.CALL_STATE_IDLE;
+                } else if (stateStr.equals(TelephonyManager.EXTRA_STATE_OFFHOOK)) {
+                    state = TelephonyManager.CALL_STATE_OFFHOOK;
+                } else if (stateStr.equals(TelephonyManager.EXTRA_STATE_RINGING)) {
+                    state = TelephonyManager.CALL_STATE_RINGING;
+                }
+
+                onCallStateChanged(state, number, chip);
+            }
+        }
+    };
+
+    public void onCallStateChanged(int state, String number, String chip) {
+        if (lastState == state) {
+            // No change, debounce extras
+            return;
+        }
+        switch (state) {
+        case TelephonyManager.CALL_STATE_RINGING:
+            isIncoming = true;
+            callStartTime = new Date();
+            savedNumber = number;
+            break;
+        case TelephonyManager.CALL_STATE_OFFHOOK:
+            // Transition of ringing->offhook are pickups of incoming calls. Nothing done on
+            // them
+            if (lastState != TelephonyManager.CALL_STATE_RINGING) {
+                isIncoming = false;
+                callStartTime = new Date();
+            }
+            break;
+        case TelephonyManager.CALL_STATE_IDLE:
+            // Went to idle- this is the end of a call. What type depends on previous
+            // state(s)
+            if (lastState == TelephonyManager.CALL_STATE_RINGING) {
+                // Ring but no pickup- a miss
+                onMissedCall(savedNumber, callStartTime, chip);
+            } else if (isIncoming) {
+                onIncomingCallEnded(savedNumber, callStartTime, new Date(), chip);
+            } else {
+                onOutgoingCallEnded(savedNumber, callStartTime, new Date(), chip);
+            }
+            break;
+        }
+        lastState = state;
+    }
+
+    private void onMissedCall(String number, Date callStart, String chip) {
+        logger.info("[LIGAÇÃO PERDIDA] número: {}, começo da ligação: {}", number, callStart);
+
+        JSONObject call = new JSONObject();
+
+        try {
+            call.put("status", "PERDIDA");
+            call.put("number", number);
+            call.put("dhEvento", callStart);
+            call.put("callStart", null);
+            call.put("callEnd", callStart);
+            call.put("chip", chip);
+            call.put("imei", imei);
+        } catch (Exception e) {
+            // TODO: handle exception
+        }
+
+        postOnApi(callsUrl, call);
+    }
+
+    private void onIncomingCallEnded(String number, Date callStart, Date callEnd, String chip) {
+        logger.info("[LIGAÇÃO RECEBIDA] número: {}, começo da ligação: {}, final da ligação: {}", number, callStart,
+                callEnd);
+
+        JSONObject call = new JSONObject();
+
+        try {
+            call.put("status", "RECEBIDA");
+            call.put("number", number);
+            call.put("dhEvento", callStart);
+            call.put("callStart", callStart);
+            call.put("callEnd", callEnd);
+            call.put("chip", chip);
+            call.put("imei", imei);
+        } catch (Exception e) {
+            // TODO: handle exception
+        }
+
+        postOnApi(callsUrl, call);
+
+    }
+
+    private void onOutgoingCallEnded(String number, Date callStart, Date callEnd, String chip) {
+        logger.info("[LIGAÇÃO REALIZADA] número: {}, começo da ligação: {}, final da ligação: {}", number, callStart,
+                callEnd);
+        JSONObject call = new JSONObject();
+
+        try {
+            call.put("status", "RECEBIDA");
+            call.put("number", number);
+            call.put("dhEvento", callStart);
+            call.put("callStart", callStart);
+            call.put("callEnd", callEnd);
+            call.put("chip", chip);
+            call.put("imei", imei);
+        } catch (Exception e) {
+            // TODO: handle exception
+        }
+
+        postOnApi(callsUrl, call);
+
+    }
+
+    private void postOnApi(String url, JSONObject data) {
+        try {
+            logger.info("Posting on: {}", url);
+            HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
+        } catch (Exception e) {
+            logger.warn("Error while posting locations: {}", e.getMessage());
+        }
+    }
 
     private boolean isNetworkAvailable() {
         ConnectivityManager cm = (ConnectivityManager) this.getSystemService(Context.CONNECTIVITY_SERVICE);
