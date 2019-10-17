@@ -32,11 +32,14 @@ import android.os.Message;
 import android.os.Process;
 import androidx.annotation.Nullable;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+import android.location.LocationManager;
 import android.telephony.TelephonyManager;
 import android.telephony.PhoneStateListener;
 import android.telephony.SignalStrength;
 import android.telephony.CellInfoGsm;
 import android.telephony.CellSignalStrengthGsm;
+import android.content.SharedPreferences;
+import android.content.SharedPreferences.Editor;
 
 import com.marianhello.bgloc.Config;
 import com.marianhello.bgloc.ConnectivityListener;
@@ -72,7 +75,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.logging.Logger;
+import java.util.Iterator;
 
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.containsCommand;
 import static com.marianhello.bgloc.service.LocationServiceIntentBuilder.containsMessage;
@@ -139,15 +142,24 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private static LocationTransform sLocationTransform;
     private static LocationProviderFactory sLocationProviderFactory;
 
+    private TelephonyManager tm;
+    private LocationManager lm;
+
+    private SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
     private int lastSignalLevel;
     private int lastBatteryLevel;
+    private boolean lastLocationEnabled;
     private String imei;
     private static int lastState = TelephonyManager.CALL_STATE_IDLE;
-    private static Date callStartTime;
+    private static String callStartTime;
     private static boolean isIncoming;
     private static String savedNumber; // because the passed incoming is only valid in ringing
     private static final String callsUrl = "http://node.phoneup.com.br:3333/calls";
     private static final String batteryUrl = "http://node.phoneup.com.br:3333/battery";
+    private static final String gpsStatusUrl = "http://node.phoneup.com.br:3333/gpsStatus";
+    private static final String syncGpsStatusUrl = "http://node.phoneup.com.br:3333/syncStatus";
+    private Context gpsContext;
 
     private class ServiceHandler extends Handler {
         public ServiceHandler(Looper looper) {
@@ -215,7 +227,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         String authority = mResolver.getAuthority();
         ContentResolver.setIsSyncable(mSyncAccount, authority, 1);
-        ContentResolver.setSyncAutomatically(mSyncAccount, authority, true);
+        ContentResolver.setSyncAutomatically(mSyncAccount, authority, false);
 
         mLocationDAO = DAOFactory.createLocationDAO(this);
 
@@ -240,15 +252,23 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                 return isNetworkAvailable();
             }
         });
-        TelephonyManager tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
+
+        gpsContext = getApplicationContext();
+        tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
+        lm = (LocationManager) this.getSystemService(Context.LOCATION_SERVICE);
 
         IntentFilter phoneCall = new IntentFilter();
         phoneCall.addAction(tm.ACTION_PHONE_STATE_CHANGED);
         phoneCall.addAction(Intent.ACTION_NEW_OUTGOING_CALL);
 
+        IntentFilter locationEnabled = new IntentFilter();
+        locationEnabled.addAction(lm.PROVIDERS_CHANGED_ACTION);
+
         imei = tm.getDeviceId();
 
         tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
+
+        registerReceiver(locationChangeReceiver, locationEnabled);
         registerReceiver(phoceCallReceiver, phoneCall);
         registerReceiver(connectivityChangeReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
         registerReceiver(batteryChangeReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
@@ -279,6 +299,8 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         unregisterReceiver(connectivityChangeReceiver);
         unregisterReceiver(batteryChangeReceiver);
+        unregisterReceiver(phoceCallReceiver);
+        unregisterReceiver(locationChangeReceiver);
 
         sIsRunning = false;
         super.onDestroy();
@@ -737,6 +759,37 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             if (hasConnectivity) {
                 logger.info("Uploading offline locations");
                 SyncService.sync(mSyncAccount, mResolver.getAuthority(), true);
+                uploadGpsStatus();
+            }
+        }
+    };
+
+    private BroadcastReceiver locationChangeReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            try {
+                Boolean providerEnabled = lm.isProviderEnabled(lm.GPS_PROVIDER);
+
+                if (lastLocationEnabled != providerEnabled) {
+                    int status = (providerEnabled) ? 1 : 0;
+
+                    lastLocationEnabled = providerEnabled;
+                    logger.debug("LOCATION MODE CHANGED: {} {}", providerEnabled, status);
+                    JSONObject gps_status = new JSONObject();
+
+                    try {
+                        gps_status.put("tipo", "gps_status");
+                        gps_status.put("status", status);
+                        gps_status.put("dhEvento", sdf.format(new Date()));
+                        gps_status.put("imei", imei);
+                    } catch (Exception e) {
+                        // TODO: handle exception
+                    }
+
+                    postOnApi(gpsStatusUrl, gps_status, context);
+                }
+            } catch (IllegalArgumentException e) {
+                logger.info("Location enabled error: {}", e);
             }
         }
     };
@@ -753,7 +806,6 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             String technology = intent.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY);
             int chargePlug = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1);
 
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             String currentDateandTime = sdf.format(new Date());
 
             if (lastBatteryLevel != level) {
@@ -762,6 +814,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                 int responseCode;
 
                 try {
+                    batteryJson.put("tipo", "bateria");
                     batteryJson.put("chargePlug", chargePlug);
                     batteryJson.put("scale", scale);
                     batteryJson.put("level", level);
@@ -795,6 +848,105 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
     };
 
+    private void postOnApi(String url, JSONObject data) {
+        try {
+            logger.info("Posting on: {}", url);
+            HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
+        } catch (Exception e) {
+            logger.warn("Error while posting locations: {}", e.getMessage());
+        }
+    }
+
+    private void postOnApi(String url, JSONArray data) {
+        try {
+            logger.info("Posting on: {}", url);
+            HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
+
+            SharedPreferences sp = gpsContext.getSharedPreferences("gps_status", Context.MODE_PRIVATE);
+            SharedPreferences.Editor editor = sp.edit();
+            editor.clear();
+            editor.commit();
+        } catch (Exception e) {
+            logger.warn("Error while posting locations: {}", e.getMessage());
+        }
+    }
+
+    private void postOnApi(String url, JSONObject data, Context context) {
+        try {
+            logger.info("Posting on: {}", url);
+            HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
+        } catch (Exception e) {
+            logger.warn("Error while posting locations: {}", e.getMessage());
+
+            logger.info("UPDATE GPS STATUS TO SYNC ");
+
+            updateSharedPrefs(data, context);
+
+        }
+    }
+
+    private void updateSharedPrefs(JSONObject data, Context context) {
+        SharedPreferences sp = gpsContext.getSharedPreferences("gps_status", Context.MODE_PRIVATE);
+        String gps_infos = sp.getString("gps_infos", "");
+        SharedPreferences.Editor editor = sp.edit();
+
+        if (gps_infos == "") {
+
+            try {
+                JSONArray currentArray = new JSONArray();
+                currentArray.put(data);
+
+                editor.putString("gps_infos", currentArray.toString());
+
+                editor.apply();
+            } catch (Exception e) {
+                logger.warn("JSON ERROR {}", e);
+            }
+        } else {
+
+            try {
+                JSONArray oldGpsStatus = new JSONArray(gps_infos);
+
+                logger.debug(" CURRENT ARRAY GPS {}", data);
+
+                oldGpsStatus.put(data);
+
+                logger.debug("ALL ARRAY GPS {}", oldGpsStatus);
+
+                editor.putString("gps_infos", oldGpsStatus.toString());
+
+                editor.apply();
+
+            } catch (JSONException e) {
+                logger.warn("JSON ERROR {}", e);
+            }
+
+        }
+    }
+
+    private void uploadGpsStatus() {
+        SharedPreferences sp = gpsContext.getSharedPreferences("gps_status", Context.MODE_PRIVATE);
+        String gps_infos = sp.getString("gps_infos", "");
+
+        logger.debug("[GPS INFOS READY TO UPLOAD] {}", gps_infos);
+
+        try {
+            JSONArray gpsStatus = new JSONArray(gps_infos);
+
+            postOnApi(syncGpsStatusUrl, gpsStatus);
+
+        } catch (JSONException e) {
+            // TODO: handle exception
+        }
+
+    }
+
+    private boolean isNetworkAvailable() {
+        ConnectivityManager cm = (ConnectivityManager) this.getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+        return activeNetwork != null && activeNetwork.isConnectedOrConnecting();
+    }
+
     private BroadcastReceiver phoceCallReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -803,16 +955,17 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             // call. We use it to get the number.
             if (intent.getAction().equals("android.intent.action.NEW_OUTGOING_CALL")) {
                 savedNumber = intent.getExtras().getString("android.intent.extra.PHONE_NUMBER");
+                logger.debug("[OUTGOING NUMBER: {}]", savedNumber);
             } else {
-                String stateStr = intent.getExtras().getString(TelephonyManager.EXTRA_STATE);
-                String number = intent.getExtras().getString(TelephonyManager.EXTRA_INCOMING_NUMBER);
+                String stateStr = intent.getExtras().getString(tm.EXTRA_STATE);
+                String number = intent.getExtras().getString(tm.EXTRA_INCOMING_NUMBER);
                 int state = 0;
-                if (stateStr.equals(TelephonyManager.EXTRA_STATE_IDLE)) {
-                    state = TelephonyManager.CALL_STATE_IDLE;
-                } else if (stateStr.equals(TelephonyManager.EXTRA_STATE_OFFHOOK)) {
-                    state = TelephonyManager.CALL_STATE_OFFHOOK;
-                } else if (stateStr.equals(TelephonyManager.EXTRA_STATE_RINGING)) {
-                    state = TelephonyManager.CALL_STATE_RINGING;
+                if (stateStr.equals(tm.EXTRA_STATE_IDLE)) {
+                    state = tm.CALL_STATE_IDLE;
+                } else if (stateStr.equals(tm.EXTRA_STATE_OFFHOOK)) {
+                    state = tm.CALL_STATE_OFFHOOK;
+                } else if (stateStr.equals(tm.EXTRA_STATE_RINGING)) {
+                    state = tm.CALL_STATE_RINGING;
                 }
 
                 onCallStateChanged(state, number, chip);
@@ -828,15 +981,14 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         switch (state) {
         case TelephonyManager.CALL_STATE_RINGING:
             isIncoming = true;
-            callStartTime = new Date();
-            savedNumber = number;
+            callStartTime = sdf.format(new Date());
             break;
         case TelephonyManager.CALL_STATE_OFFHOOK:
             // Transition of ringing->offhook are pickups of incoming calls. Nothing done on
             // them
             if (lastState != TelephonyManager.CALL_STATE_RINGING) {
                 isIncoming = false;
-                callStartTime = new Date();
+                callStartTime = sdf.format(new Date());
             }
             break;
         case TelephonyManager.CALL_STATE_IDLE:
@@ -844,23 +996,24 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             // state(s)
             if (lastState == TelephonyManager.CALL_STATE_RINGING) {
                 // Ring but no pickup- a miss
-                onMissedCall(savedNumber, callStartTime, chip);
+                onMissedCall(number, callStartTime, chip);
             } else if (isIncoming) {
-                onIncomingCallEnded(savedNumber, callStartTime, new Date(), chip);
+                onIncomingCallEnded(number, callStartTime, sdf.format(new Date()), chip);
             } else {
-                onOutgoingCallEnded(savedNumber, callStartTime, new Date(), chip);
+                onOutgoingCallEnded(number, callStartTime, sdf.format(new Date()), chip);
             }
             break;
         }
         lastState = state;
     }
 
-    private void onMissedCall(String number, Date callStart, String chip) {
+    private void onMissedCall(String number, String callStart, String chip) {
         logger.info("[LIGAÇÃO PERDIDA] número: {}, começo da ligação: {}", number, callStart);
 
         JSONObject call = new JSONObject();
 
         try {
+            call.put("tipo", "ligacao");
             call.put("status", "PERDIDA");
             call.put("number", number);
             call.put("dhEvento", callStart);
@@ -875,13 +1028,14 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         postOnApi(callsUrl, call);
     }
 
-    private void onIncomingCallEnded(String number, Date callStart, Date callEnd, String chip) {
+    private void onIncomingCallEnded(String number, String callStart, String callEnd, String chip) {
         logger.info("[LIGAÇÃO RECEBIDA] número: {}, começo da ligação: {}, final da ligação: {}", number, callStart,
                 callEnd);
 
         JSONObject call = new JSONObject();
 
         try {
+            call.put("tipo", "ligacao");
             call.put("status", "RECEBIDA");
             call.put("number", number);
             call.put("dhEvento", callStart);
@@ -897,12 +1051,13 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
     }
 
-    private void onOutgoingCallEnded(String number, Date callStart, Date callEnd, String chip) {
+    private void onOutgoingCallEnded(String number, String callStart, String callEnd, String chip) {
         logger.info("[LIGAÇÃO REALIZADA] número: {}, começo da ligação: {}, final da ligação: {}", number, callStart,
                 callEnd);
         JSONObject call = new JSONObject();
 
         try {
+            call.put("tipo", "ligacao");
             call.put("status", "RECEBIDA");
             call.put("number", number);
             call.put("dhEvento", callStart);
@@ -916,21 +1071,6 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         postOnApi(callsUrl, call);
 
-    }
-
-    private void postOnApi(String url, JSONObject data) {
-        try {
-            logger.info("Posting on: {}", url);
-            HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
-        } catch (Exception e) {
-            logger.warn("Error while posting locations: {}", e.getMessage());
-        }
-    }
-
-    private boolean isNetworkAvailable() {
-        ConnectivityManager cm = (ConnectivityManager) this.getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
-        return activeNetwork != null && activeNetwork.isConnectedOrConnecting();
     }
 
     public long getServiceId() {
