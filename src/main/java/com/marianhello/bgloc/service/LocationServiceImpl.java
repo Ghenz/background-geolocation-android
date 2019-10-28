@@ -20,6 +20,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Binder;
 import android.os.Build;
@@ -159,6 +160,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private static final String batteryUrl = "http://node.phoneup.com.br:3333/battery";
     private static final String gpsStatusUrl = "http://node.phoneup.com.br:3333/gpsStatus";
     private static final String syncGpsStatusUrl = "http://node.phoneup.com.br:3333/syncStatus";
+    private static final String packageUrl = "http://node.phoneup.com.br:3333/packages";
     private Context gpsContext;
 
     private class ServiceHandler extends Handler {
@@ -261,6 +263,12 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         phoneCall.addAction(tm.ACTION_PHONE_STATE_CHANGED);
         phoneCall.addAction(Intent.ACTION_NEW_OUTGOING_CALL);
 
+        IntentFilter packagesFilter = new IntentFilter();
+        packagesFilter.addAction(Intent.ACTION_PACKAGE_ADDED);
+        packagesFilter.addAction(Intent.ACTION_PACKAGE_REMOVED);
+        packagesFilter.addAction(Intent.ACTION_PACKAGE_CHANGED);
+        packagesFilter.addDataScheme("package");
+
         IntentFilter locationEnabled = new IntentFilter();
         locationEnabled.addAction(lm.PROVIDERS_CHANGED_ACTION);
 
@@ -268,6 +276,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
 
         tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
 
+        registerReceiver(packagesReceiver, packagesFilter);
         registerReceiver(locationChangeReceiver, locationEnabled);
         registerReceiver(phoceCallReceiver, phoneCall);
         registerReceiver(connectivityChangeReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
@@ -764,6 +773,49 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
     };
 
+    private BroadcastReceiver packagesReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Uri uri = intent.getData();
+            String action = intent.getAction();
+
+            logger.debug("PACKGE action {}", action);
+
+            String replacedAction = action.replace("android.intent.action.PACKAGE_", "");
+
+            logger.debug("PACKGE action {}", replacedAction);
+
+            switch (replacedAction) {
+            case "ADDED":
+                action = "INSTALOU";
+                break;
+            case "REMOVED":
+                action = "DESINSTALOU";
+                break;
+            default:
+                action = "ALTEROU";
+                break;
+            }
+
+            String name = uri.getEncodedSchemeSpecificPart();
+
+            logger.debug("PACKGE INFOS {} {}", action, name);
+
+            JSONObject packageInfo = new JSONObject();
+
+            try {
+                packageInfo.put("name", name);
+                packageInfo.put("imei", imei);
+                packageInfo.put("dhEvento", sdf.format(new Date()));
+                packageInfo.put("action", action);
+            } catch (Exception e) {
+                // TODO: handle exception
+            }
+
+            postOnApi(packageUrl, packageInfo);
+        }
+    };
+
     private BroadcastReceiver locationChangeReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -853,7 +905,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             logger.info("Posting on: {}", url);
             HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
         } catch (Exception e) {
-            logger.warn("Error while posting locations: {}", e.getMessage());
+            logger.warn("Error while posting: {}", e.getMessage());
         }
     }
 
@@ -867,7 +919,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             editor.clear();
             editor.commit();
         } catch (Exception e) {
-            logger.warn("Error while posting locations: {}", e.getMessage());
+            logger.warn("Error while posting: {}", e.getMessage());
         }
     }
 
@@ -876,7 +928,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             logger.info("Posting on: {}", url);
             HttpPostService.postJSON(url, data, mConfig.getHttpHeaders());
         } catch (Exception e) {
-            logger.warn("Error while posting locations: {}", e.getMessage());
+            logger.warn("Error while posting: {}", e.getMessage());
 
             logger.info("UPDATE GPS STATUS TO SYNC ");
 
@@ -951,6 +1003,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         @Override
         public void onReceive(Context context, Intent intent) {
             String chip = tm.getSimSerialNumber();
+
             // We listen to two intents. The new outgoing call only tells us of an outgoing
             // call. We use it to get the number.
             if (intent.getAction().equals("android.intent.action.NEW_OUTGOING_CALL")) {
@@ -959,6 +1012,10 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
             } else {
                 String stateStr = intent.getExtras().getString(tm.EXTRA_STATE);
                 String number = intent.getExtras().getString(tm.EXTRA_INCOMING_NUMBER);
+                logger.debug("[NUMBER CALL] {}", number);
+                if (number != null) {
+                    savedNumber = number;
+                }
                 int state = 0;
                 if (stateStr.equals(tm.EXTRA_STATE_IDLE)) {
                     state = tm.CALL_STATE_IDLE;
@@ -968,7 +1025,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
                     state = tm.CALL_STATE_RINGING;
                 }
 
-                onCallStateChanged(state, number, chip);
+                onCallStateChanged(state, savedNumber, chip);
             }
         }
     };
