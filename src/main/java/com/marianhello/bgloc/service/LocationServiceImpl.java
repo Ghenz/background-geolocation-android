@@ -161,12 +161,12 @@ public class LocationServiceImpl extends Service implements ProviderDelegate, Lo
     private static String callStartTime;
     private static boolean isIncoming;
     private static String savedNumber; // because the passed incoming is only valid in ringing
-    private static final String callsUrl = "http://node.phoneup.com.br:3333/calls";
-    private static final String batteryUrl = "http://node.phoneup.com.br:3333/battery";
-    private static final String gpsStatusUrl = "http://node.phoneup.com.br:3333/gpsStatus";
-    private static final String syncGpsStatusUrl = "http://node.phoneup.com.br:3333/syncStatus";
-    private static final String packageUrl = "http://node.phoneup.com.br:3333/packages";
-    public static final String smsUrl = "http://node.phoneup.com.br:3333/sms";
+    private static final String callsUrl = "http://localhost:3333/calls";
+    private static final String batteryUrl = "http://localhost:3333/battery";
+    private static final String gpsStatusUrl = "http://localhost:3333/gpsStatus";
+    private static final String syncGpsStatusUrl = "http://localhost:3333/syncStatus";
+    private static final String packageUrl = "http://localhost:3333/packages";
+    public static final String smsUrl = "http://localhost:3333/sms";
     private static final String SMS_RECEIVED = "android.provider.Telephony.SMS_RECEIVED";
     private Context gpsContext;
 
